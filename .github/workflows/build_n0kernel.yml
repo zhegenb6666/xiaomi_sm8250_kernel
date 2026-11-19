@@ -116,9 +116,14 @@ jobs:
             cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/arch/arm64/boot
             ls
             strings Image | grep "Linux version"
-            mkdir $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/
-            mkdir $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
+            mkdir -p $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
             cp Image $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
+            echo "=== 打包 dtb / dtbo ==="
+            ls -l dtb* 2>/dev/null || true
+            if [ -f dtb ]; then cp dtb $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/dtb; echo "dtb OK $(stat -c%s dtb)"; fi
+            if [ -f dtbo.img ]; then cp dtbo.img $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/dtbo.img; echo "dtbo OK $(stat -c%s dtbo.img)"; fi
+            echo "=== Anykernel 产物 ==="
+            ls -l $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/
 
       - name: 8.上传刷机包
         uses: actions/upload-artifact@v4
