@@ -89,8 +89,11 @@ jobs:
           else
             echo "跳过susfs修补"
           fi
-          echo "=== 通用修复：注释掉不存在的 qdf_set_wake_up_idle 导出 ==="
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          echo "=== 修复 4.19 不支持的 MODULE_IMPORT_NS 宏 ==="
+          sed -i 's/^MODULE_IMPORT_NS(/\/\/ MODULE_IMPORT_NS(/' drivers/kernelsu/core/init.c
+          grep -n "MODULE_IMPORT_NS" drivers/kernelsu/core/init.c | head -4
+          echo "=== 通用修复：注释掉不存在的 qdf_set_wake_up_idle 导出 ==="
           sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
           grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
         
