@@ -60,9 +60,13 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
           patch -p1 < new_defconfig.patch
+          echo "=== 修复 defconfig 末尾换行（否则追加会粘连） ==="
+          [ -n "$(tail -c1 arch/arm64/configs/vendor/cmi_defconfig)" ] && echo "" >> arch/arm64/configs/vendor/cmi_defconfig
           echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
+          sed -i 's/^CONFIG_KPROBES=n$/CONFIG_KPROBES=y/' arch/arm64/configs/vendor/cmi_defconfig
           grep -q "^CONFIG_KPROBES=y" arch/arm64/configs/vendor/cmi_defconfig || echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/cmi_defconfig
           echo "=== 启用 KSU (关键：setup.sh 不会自动改 defconfig) ==="
+          sed -i 's/^CONFIG_KSU=n$/CONFIG_KSU=y/' arch/arm64/configs/vendor/cmi_defconfig
           grep -q "^CONFIG_KSU=y" arch/arm64/configs/vendor/cmi_defconfig || echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/cmi_defconfig
           echo "CONFIG_KSU_SHELL_ADB_ONLY=y" >> arch/arm64/configs/vendor/cmi_defconfig || true
           grep -nE "^CONFIG_KSU|^CONFIG_KPROBES" arch/arm64/configs/vendor/cmi_defconfig
@@ -82,11 +86,13 @@ jobs:
             cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/50_add_susfs_in_kernel-4.19.patch .
             echo "执行susfs补丁"
             patch -p1 < 50_add_susfs_in_kernel-4.19.patch || true
-            echo "修复susfs补丁"
-            patch -p1 < after_patch_fix.patch            
           else
             echo "跳过susfs修补"
           fi
+          echo "=== 通用修复：注释掉不存在的 qdf_set_wake_up_idle 导出 ==="
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
+          grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
         
       - name: 6.开始构建
         run: |
