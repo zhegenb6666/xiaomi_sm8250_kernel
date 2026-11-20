@@ -51,7 +51,7 @@ jobs:
       - name: 3.添加KernelSU Next
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/v3.3.1/kernel/setup.sh" | bash -s v3.3.1
 
       - name: 4.修补KernelSU Next
         run: |
@@ -60,7 +60,10 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
           patch -p1 < new_defconfig.patch
-          patch -p1 < non-kprobes.patch
+          echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
+          grep -q "^CONFIG_KPROBES=y" arch/arm64/configs/vendor/cmi_defconfig || echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/cmi_defconfig
+          echo "CONFIG_KPROBES_EVENTS=y" >> arch/arm64/configs/vendor/cmi_defconfig || true
+          grep -n KPROBES arch/arm64/configs/vendor/cmi_defconfig | head -5
 
       - name: 5.修补susfs
         run: |
