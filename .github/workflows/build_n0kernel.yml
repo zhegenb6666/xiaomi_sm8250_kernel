@@ -149,6 +149,15 @@ jobs:
 
           #endif /* < 5.8.0 */
 
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+          /*
+           * sys_enter is declared through TRACE_EVENT_FN(), which only emits
+           * register_trace_##name on 4.19; the _prio variant does not exist.
+           */
+          #define register_trace_prio_sys_enter(probe, data, prio) \
+          	register_trace_sys_enter((probe), (data))
+          #endif /* < 5.0.0 */
+
           #endif /* _KSU_COMPAT_419_H */
           KSUEOF
           echo "compat header written: $(wc -l < drivers/kernelsu/compat_419.h) lines"
@@ -159,7 +168,8 @@ jobs:
             drivers/kernelsu/manager/pkg_observer.c \
             drivers/kernelsu/policy/allowlist.c \
             drivers/kernelsu/supercall/supercall.c \
-            drivers/kernelsu/feature/kernel_umount.c ; do
+            drivers/kernelsu/feature/kernel_umount.c \
+            drivers/kernelsu/hook/syscall_hook_manager.c ; do
             if [ -f "$f" ] && ! grep -q 'compat_419.h' "$f"; then
               sed -i '1i #include "compat_419.h"' "$f"
               echo "injected -> $f"
@@ -198,7 +208,7 @@ jobs:
           echo "当前配置为 $DEFCONFIG"
 
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j8 CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument"
+          make -j8 -k CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration -Wimplicit-function-declaration"
 
       - name: 8.复制boot文件
         run: |
