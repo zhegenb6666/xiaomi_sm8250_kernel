@@ -106,6 +106,10 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
           grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
+          echo "=== 修复 4.19 无 register_trace_prio_sys_enter ==="
+          echo "（本树 sys_enter 由 TRACE_EVENT_FN 定义，只生成非 prio 版）"
+          sed -i 's/register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN)/register_trace_sys_enter(ksu_sys_enter_handler, NULL)/' drivers/kernelsu/hook/hook_manager.c
+          grep -n "register_trace.*sys_enter" drivers/kernelsu/hook/hook_manager.c
 
       - name: 6.开始构建
         run: |
