@@ -71,18 +71,18 @@ jobs:
           for DEF in arch/arm64/configs/vendor/cmi_defconfig arch/arm64/configs/vendor/umi_defconfig; do
             [ -f "$DEF" ] || continue
             echo "=== 处理 $DEF ==="
-          echo "=== 修复 defconfig 末尾换行（否则追加会粘连） ==="
-          if [ -n "$(tail -c1 $DEF)" ]; then echo "" >> $DEF; fi
+            echo "=== 修复 defconfig 末尾换行（否则追加会粘连） ==="
+            if [ -n "$(tail -c1 $DEF)" ]; then echo "" >> $DEF; fi
             echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
             sed -i 's/^CONFIG_KPROBES=n$/CONFIG_KPROBES=y/' $DEF
             set_cfg CONFIG_KPROBES y $DEF
             echo "=== 启用 KSU (关键：setup.sh 不会自动改 defconfig) ==="
             sed -i 's/^CONFIG_KSU=n$/CONFIG_KSU=y/' $DEF
             set_cfg CONFIG_KSU y $DEF
-            echo "=== 开启硬件虚拟化 KVM (arm64 EL2 host) ==="
+            echo "=== 开关硬件虚拟化 KVM (arm64 EL2 host) ==="
             set_cfg CONFIG_VIRTUALIZATION y $DEF
             set_cfg CONFIG_KVM y $DEF
-            echo "=== 开启 vhost/vsock 加速面 ==="
+            echo "=== 开关 vhost/vsock 加速面 ==="
             set_cfg CONFIG_VSOCKETS y $DEF
             set_cfg CONFIG_VHOST_NET y $DEF
             set_cfg CONFIG_VHOST_VSOCK y $DEF
@@ -120,7 +120,7 @@ jobs:
           sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
           grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
 
-      - name: 6.4.19内核兼容层（nofault/TWA_RESUME）
+      - name: 6.4.19内核兼容层
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           cat > drivers/kernelsu/compat_419.h <<'KSUEOF'
@@ -132,12 +132,6 @@ jobs:
           #include <linux/uaccess.h>
           #include <linux/task_work.h>
 
-          /*
-           * Linux 4.19 does not provide the 5.8+ APIs below.
-           * strncpy_from_unsafe_user() is the direct predecessor of
-           * strncpy_from_user_nofault(); task_work_add() still takes a
-           * bool notify flag instead of the 5.8+ TWA_* enum.
-           */
           #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 
           #ifndef TWA_RESUME
@@ -146,6 +140,36 @@ jobs:
 
           #define strncpy_from_user_nofault(dst, src, len) \
           	strncpy_from_unsafe_user((char *)(dst), (const void __user *)(src), (long)(len))
+
+          static inline long __ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+          {
+          	mm_segment_t old_fs = get_fs();
+          	long ret;
+
+          	set_fs(KERNEL_DS);
+          	pagefault_disable();
+          	ret = __copy_from_user_inatomic(dst, src, size);
+          	pagefault_enable();
+          	set_fs(old_fs);
+          	return ret ? -EFAULT : 0;
+          }
+
+          static inline long __ksu_copy_to_user_nofault(void __user *dst, const void *src, size_t size)
+          {
+          	mm_segment_t old_fs = get_fs();
+          	long ret;
+
+          	set_fs(KERNEL_DS);
+          	pagefault_disable();
+          	ret = __copy_to_user_inatomic(dst, src, size);
+          	pagefault_enable();
+          	set_fs(old_fs);
+          	return ret ? -EFAULT : 0;
+          }
+
+          #define copy_from_user_nofault __ksu_copy_from_user_nofault
+          #define copy_to_user_nofault __ksu_copy_to_user_nofault
+          #define copy_to_kernel_nofault(dst, src, size) probe_kernel_write((dst), (src), (size))
 
           #endif /* < 5.8.0 */
 
@@ -156,29 +180,47 @@ jobs:
            */
           #define register_trace_prio_sys_enter(probe, data, prio) \
           	register_trace_sys_enter((probe), (data))
+
+          /* 5.x accessors were plain struct members before the LSM refactor. */
+          #define selinux_cred(cred) ((void *)((cred)->security))
+          #define selinux_inode(inode) ((void *)((inode)->i_security))
+
+          /* Added as helpers in 5.x; both are hashtab lookups in 4.19. */
+          #define symtab_search(sym, name) hashtab_search((sym)->table, (name))
+          #define policydb_filenametr_search(pol, key) hashtab_search((pol)->filename_trans, (key))
+
+          /* 5.10+ anon-inode LSM hook; 4.19 labels anon inodes via inode_alloc. */
+          #define security_inode_init_security_anon(inode, name, context_inode) 0
           #endif /* < 5.0.0 */
 
           #endif /* _KSU_COMPAT_419_H */
           KSUEOF
-          echo "compat header written: $(wc -l < drivers/kernelsu/compat_419.h) lines"
-          for f in \
-            drivers/kernelsu/feature/sucompat.c \
-            drivers/kernelsu/runtime/ksud_integration.c \
-            drivers/kernelsu/sulog/event.c \
-            drivers/kernelsu/manager/pkg_observer.c \
-            drivers/kernelsu/policy/allowlist.c \
-            drivers/kernelsu/supercall/supercall.c \
-            drivers/kernelsu/feature/kernel_umount.c \
-            drivers/kernelsu/hook/syscall_hook_manager.c ; do
-            if [ -f "$f" ] && ! grep -q 'compat_419.h' "$f"; then
+          echo "compat header: $(wc -l < drivers/kernelsu/compat_419.h) lines"
+          for f in $(find -L drivers/kernelsu -name '*.c'); do
+            if ! grep -q 'compat_419.h' "$f"; then
               sed -i '1i #include "compat_419.h"' "$f"
-              echo "injected -> $f"
             fi
           done
-          echo "=== 确认注入 ==="
-          grep -n "compat_419.h" drivers/kernelsu/feature/sucompat.c drivers/kernelsu/policy/allowlist.c | head -4
-          echo "=== 确认 nofault 映射生效 ==="
-          grep -rn "strncpy_from_user_nofault" drivers/kernelsu/ | head -6
+          echo "injected into $(grep -rl 'compat_419.h' drivers/kernelsu --include=*.c | wc -l) .c files"
+          echo "=== SELinux Hide: 4.19 无 selinux_policy 抽象，降级为桩 ==="
+          SH=drivers/kernelsu/feature/selinux_hide.c
+          cp "$SH" "$SH.orig"
+          cat > "$SH" <<'SHEOF'
+          #include <linux/version.h>
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+          #include "feature/selinux_hide.h"
+          /* 4.19: selinux_state has no ->policy; upstream hide needs 5.7+ internals. */
+          void ksu_selinux_hide_init(void) {}
+          void ksu_selinux_hide_exit(void) {}
+          void ksu_selinux_hide_drop_backup_if_unused(void) {}
+          void ksu_selinux_hide_handle_second_stage(void) {}
+          void ksu_selinux_hide_handle_post_fs_data(void) {}
+          #else
+          SHEOF
+          cat "$SH.orig" >> "$SH"
+          printf '\n#endif /* KSU_SELINUX_HIDE_419_STUB */\n' >> "$SH"
+          rm -f "$SH.orig"
+          echo "selinux_hide stub: $(wc -l < $SH) lines total"
 
       - name: 7.开始构建
         run: |
@@ -208,7 +250,7 @@ jobs:
           echo "当前配置为 $DEFCONFIG"
 
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j8 -k CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration -Wimplicit-function-declaration"
+          make -j8 CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument"
 
       - name: 8.复制boot文件
         run: |
