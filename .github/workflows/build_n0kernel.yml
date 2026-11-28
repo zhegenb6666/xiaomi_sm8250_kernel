@@ -48,15 +48,21 @@ jobs:
           git clone https://github.com/clcwpwqi/kernel.git src
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 --depth=1 susfs
 
-      - name: 3.添加KernelSU Next
+      - name: 3.注入 KernelSU-Next legacy（4.x 内核分支）
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/v3.3.1/kernel/setup.sh" | bash -s v3.3.1
+          echo "=== 使用 legacy 分支：含 selinux_state.ss 路径 + 4.x 版 selinux_hide ==="
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
+          echo "=== 确认注入结果 ==="
+          ls -l drivers/kernelsu | head -5
+          echo "--- selinux_hide 大小（legacy 应约 10.7KB，主线约 36KB）---"
+          wc -c drivers/kernelsu/feature/selinux_hide.c
+          echo "--- 老内核分支是否在 ---"
+          grep -n "SELINUX_POLICY_INSTEAD_SELINUX_SS" drivers/kernelsu/selinux/rules.c | head -3
+          grep -n "ksu_get_policy_rwlock" drivers/kernelsu/selinux/rules.c | head -3
 
-      - name: 4.修补KernelSU Next
+      - name: 4.修补 defconfig（KSU / KPROBES / KVM）
         run: |
-          ls
-          echo "进入源码目录"
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
           patch -p1 < new_defconfig.patch
@@ -71,22 +77,16 @@ jobs:
           for DEF in arch/arm64/configs/vendor/cmi_defconfig arch/arm64/configs/vendor/umi_defconfig; do
             [ -f "$DEF" ] || continue
             echo "=== 处理 $DEF ==="
-            echo "=== 修复 defconfig 末尾换行（否则追加会粘连） ==="
             if [ -n "$(tail -c1 $DEF)" ]; then echo "" >> $DEF; fi
-            echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
-            sed -i 's/^CONFIG_KPROBES=n$/CONFIG_KPROBES=y/' $DEF
             set_cfg CONFIG_KPROBES y $DEF
-            echo "=== 启用 KSU (关键：setup.sh 不会自动改 defconfig) ==="
-            sed -i 's/^CONFIG_KSU=n$/CONFIG_KSU=y/' $DEF
             set_cfg CONFIG_KSU y $DEF
-            echo "=== 开关硬件虚拟化 KVM (arm64 EL2 host) ==="
+            echo "=== 硬件虚拟化 KVM ==="
             set_cfg CONFIG_VIRTUALIZATION y $DEF
             set_cfg CONFIG_KVM y $DEF
-            echo "=== 开关 vhost/vsock 加速面 ==="
             set_cfg CONFIG_VSOCKETS y $DEF
             set_cfg CONFIG_VHOST_NET y $DEF
             set_cfg CONFIG_VHOST_VSOCK y $DEF
-            echo "=== 确认结果 ==="
+            echo "=== 确认 ==="
             grep -nE "^CONFIG_(KSU|KPROBES|VIRTUALIZATION|KVM|VSOCKETS|VHOST_NET|VHOST_VSOCK|TUN|BRIDGE|ARM_GIC_V3)=" $DEF
           done
 
@@ -95,182 +95,58 @@ jobs:
           if [ ${{ inputs.susfs }} = 'SUSFS' ]; then
             echo "选择susfs修补"
             cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-            echo "复制susfs/kernel_patches/fs/"
             cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/fs/* ./fs/
-            echo "复制susfs/kernel_patches/include/linux/"
             cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/include/linux/* ./include/linux/
-            echo "复制susfs内核补丁"
             cp $GITHUB_WORKSPACE/kernel_workspace/susfs/kernel_patches/50_add_susfs_in_kernel-4.19.patch .
-            echo "执行susfs补丁"
             patch -p1 < 50_add_susfs_in_kernel-4.19.patch || true
           else
             echo "跳过susfs修补"
           fi
-          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          echo "=== 修复 4.19 不支持的 MODULE_IMPORT_NS 宏 ==="
-          sed -i 's/^MODULE_IMPORT_NS(/\/\/ MODULE_IMPORT_NS(/' drivers/kernelsu/core/init.c
-          grep -n "MODULE_IMPORT_NS" drivers/kernelsu/core/init.c | head -4
-          echo "=== 修复 4.19 缺失的新内核头文件 ==="
-          sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|' drivers/kernelsu/feature/sucompat.c
-          sed -i 's|#include <linux/hex.h>|#include <linux/kernel.h>|' drivers/kernelsu/manager/apk_sign.c
-          sed -i 's|#include <linux/minmax.h>|#include <linux/kernel.h>|' drivers/kernelsu/sulog/event.c
-          echo "header fixes applied"
-          grep -n "pgtable.h" drivers/kernelsu/feature/sucompat.c | head -2
           echo "=== 通用修复：注释掉不存在的 qdf_set_wake_up_idle 导出 ==="
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
           grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
 
-      - name: 6.4.19内核兼容层
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          cat > drivers/kernelsu/compat_419.h <<'KSUEOF'
-          #ifndef _KSU_COMPAT_419_H
-          #define _KSU_COMPAT_419_H
-
-          #include <linux/version.h>
-          #include <linux/types.h>
-          #include <linux/uaccess.h>
-          #include <linux/task_work.h>
-
-          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
-
-          #ifndef TWA_RESUME
-          #define TWA_RESUME true
-          #endif
-
-          #define strncpy_from_user_nofault(dst, src, len) \
-          	strncpy_from_unsafe_user((char *)(dst), (const void __user *)(src), (long)(len))
-
-          static inline long __ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size)
-          {
-          	mm_segment_t old_fs = get_fs();
-          	long ret;
-
-          	set_fs(KERNEL_DS);
-          	pagefault_disable();
-          	ret = __copy_from_user_inatomic(dst, src, size);
-          	pagefault_enable();
-          	set_fs(old_fs);
-          	return ret ? -EFAULT : 0;
-          }
-
-          static inline long __ksu_copy_to_user_nofault(void __user *dst, const void *src, size_t size)
-          {
-          	mm_segment_t old_fs = get_fs();
-          	long ret;
-
-          	set_fs(KERNEL_DS);
-          	pagefault_disable();
-          	ret = __copy_to_user_inatomic(dst, src, size);
-          	pagefault_enable();
-          	set_fs(old_fs);
-          	return ret ? -EFAULT : 0;
-          }
-
-          #define copy_from_user_nofault __ksu_copy_from_user_nofault
-          #define copy_to_user_nofault __ksu_copy_to_user_nofault
-          #define copy_to_kernel_nofault(dst, src, size) probe_kernel_write((dst), (src), (size))
-
-          #endif /* < 5.8.0 */
-
-          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
-          /*
-           * sys_enter is declared through TRACE_EVENT_FN(), which only emits
-           * register_trace_##name on 4.19; the _prio variant does not exist.
-           */
-          #define register_trace_prio_sys_enter(probe, data, prio) \
-          	register_trace_sys_enter((probe), (data))
-
-          /* 5.x accessors were plain struct members before the LSM refactor. */
-          #define selinux_cred(cred) ((void *)((cred)->security))
-          #define selinux_inode(inode) ((void *)((inode)->i_security))
-
-          /* Added as helpers in 5.x; both are hashtab lookups in 4.19. */
-          #define symtab_search(sym, name) hashtab_search((sym)->table, (name))
-          #define policydb_filenametr_search(pol, key) hashtab_search((pol)->filename_trans, (key))
-
-          /* 5.10+ anon-inode LSM hook; 4.19 labels anon inodes via inode_alloc. */
-          #define security_inode_init_security_anon(inode, name, context_inode) 0
-          #endif /* < 5.0.0 */
-
-          #endif /* _KSU_COMPAT_419_H */
-          KSUEOF
-          echo "compat header: $(wc -l < drivers/kernelsu/compat_419.h) lines"
-          for f in $(find -L drivers/kernelsu -name '*.c'); do
-            if ! grep -q 'compat_419.h' "$f"; then
-              sed -i '1i #include "compat_419.h"' "$f"
-            fi
-          done
-          echo "injected into $(grep -rl 'compat_419.h' drivers/kernelsu --include=*.c | wc -l) .c files"
-          echo "=== SELinux Hide: 4.19 无 selinux_policy 抽象，降级为桩 ==="
-          SH=drivers/kernelsu/feature/selinux_hide.c
-          cp "$SH" "$SH.orig"
-          cat > "$SH" <<'SHEOF'
-          #include <linux/version.h>
-          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
-          #include "feature/selinux_hide.h"
-          /* 4.19: selinux_state has no ->policy; upstream hide needs 5.7+ internals. */
-          void ksu_selinux_hide_init(void) {}
-          void ksu_selinux_hide_exit(void) {}
-          void ksu_selinux_hide_drop_backup_if_unused(void) {}
-          void ksu_selinux_hide_handle_second_stage(void) {}
-          void ksu_selinux_hide_handle_post_fs_data(void) {}
-          #else
-          SHEOF
-          cat "$SH.orig" >> "$SH"
-          printf '\n#endif /* KSU_SELINUX_HIDE_419_STUB */\n' >> "$SH"
-          rm -f "$SH.orig"
-          echo "selinux_hide stub: $(wc -l < $SH) lines total"
-
-      - name: 7.开始构建
+      - name: 6.开始构建
         run: |
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
-          echo "Updated PATH: $PATH"
           clang --version
 
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
-          # 自定义版本
           if [ ! -z ${{ inputs.version }} ]; then
-            echo "不为空"
             sed -i '$s|echo "\$res"|echo "-${{ inputs.version }}"|' ./scripts/setlocalversion
-          else
-            echo "输入为空"
           fi
 
           if [ ${{ inputs.phone }} = 'umi' ]; then
-            echo "选择小米10配置"
             DEFCONFIG=vendor/umi_defconfig
           elif [ ${{ inputs.phone }} = 'cmi' ]; then
-            echo "选择小米10Pro配置"
             DEFCONFIG=vendor/cmi_defconfig
           else
-            echo "输入错误"
+            echo "输入错误"; exit 1
           fi
-
           echo "当前配置为 $DEFCONFIG"
 
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
-          make -j8 -k CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration -Wimplicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -ferror-limit=0"
+          make -j8 CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument"
 
-      - name: 8.复制boot文件
+      - name: 7.复制产物
         run: |
             cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/arch/arm64/boot
             ls
             strings Image | grep "Linux version"
             echo "=== 确认 KVM 已编入 ==="
             grep -E "^CONFIG_(VIRTUALIZATION|KVM|VSOCKETS|VHOST_NET)=" $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/.config || true
+            echo "=== 确认 KSU 已编入 ==="
+            grep -E "^CONFIG_(KSU|KPROBES)=" $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/.config || true
             mkdir -p $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
             cp Image $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
-            echo "=== 打包 dtb / dtbo ==="
-            ls -l dtb* 2>/dev/null || true
             if [ -f dtb ]; then cp dtb $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/dtb; echo "dtb OK $(stat -c%s dtb)"; fi
             if [ -f dtbo.img ]; then cp dtbo.img $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/dtbo.img; echo "dtbo OK $(stat -c%s dtbo.img)"; fi
-            echo "=== Anykernel 产物 ==="
             ls -l $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/
 
-      - name: 9.上传刷机包
+      - name: 8.上传刷机包
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.phone }}-KernelSU-Next-${{ inputs.susfs }}-AnyKernel3
+          name: ${{ inputs.phone }}-KSUNext-legacy-${{ inputs.susfs }}-AnyKernel3
           path: kernel_workspace/src/Anykernel/*
           retention-days: 3
