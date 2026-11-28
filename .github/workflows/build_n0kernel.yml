@@ -60,18 +60,35 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           cp $GITHUB_WORKSPACE/kernel_workspace/src/patches/* .
           patch -p1 < new_defconfig.patch
+
+          set_cfg() {
+            local k="$1"; local v="$2"; local f="$3"
+            sed -i "/^${k}=/d" "$f"
+            sed -i "/^# ${k} is not set$/d" "$f"
+            printf '%s=%s\n' "$k" "$v" >> "$f"
+          }
+
+          for DEF in arch/arm64/configs/vendor/cmi_defconfig arch/arm64/configs/vendor/umi_defconfig; do
+            [ -f "$DEF" ] || continue
+            echo "=== 处理 $DEF ==="
           echo "=== 修复 defconfig 末尾换行（否则追加会粘连） ==="
-          [ -n "$(tail -c1 arch/arm64/configs/vendor/cmi_defconfig)" ] && echo "" >> arch/arm64/configs/vendor/cmi_defconfig
-          echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
-          sed -i 's/^CONFIG_KPROBES=n$/CONFIG_KPROBES=y/' arch/arm64/configs/vendor/cmi_defconfig
-          grep -q "^CONFIG_KPROBES=y" arch/arm64/configs/vendor/cmi_defconfig || echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/cmi_defconfig
-          echo "=== 启用 KSU (关键：setup.sh 不会自动改 defconfig) ==="
-          sed -i 's/^CONFIG_KSU=n$/CONFIG_KSU=y/' arch/arm64/configs/vendor/cmi_defconfig
-          grep -q "^CONFIG_KSU=y" arch/arm64/configs/vendor/cmi_defconfig || echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/cmi_defconfig
-          echo "CONFIG_KSU_SHELL_ADB_ONLY=y" >> arch/arm64/configs/vendor/cmi_defconfig || true
-          grep -nE "^CONFIG_KSU|^CONFIG_KPROBES" arch/arm64/configs/vendor/cmi_defconfig
-          echo "CONFIG_KPROBES_EVENTS=y" >> arch/arm64/configs/vendor/cmi_defconfig || true
-          grep -n KPROBES arch/arm64/configs/vendor/cmi_defconfig | head -5
+          if [ -n "$(tail -c1 $DEF)" ]; then echo "" >> $DEF; fi
+            echo "=== 开启 KPROBES (原版 KSU v3.3.1 必需) ==="
+            sed -i 's/^CONFIG_KPROBES=n$/CONFIG_KPROBES=y/' $DEF
+            set_cfg CONFIG_KPROBES y $DEF
+            echo "=== 启用 KSU (关键：setup.sh 不会自动改 defconfig) ==="
+            sed -i 's/^CONFIG_KSU=n$/CONFIG_KSU=y/' $DEF
+            set_cfg CONFIG_KSU y $DEF
+            echo "=== 开启硬件虚拟化 KVM (arm64 EL2 host) ==="
+            set_cfg CONFIG_VIRTUALIZATION y $DEF
+            set_cfg CONFIG_KVM y $DEF
+            echo "=== 开启 vhost/vsock 加速面 ==="
+            set_cfg CONFIG_VSOCKETS y $DEF
+            set_cfg CONFIG_VHOST_NET y $DEF
+            set_cfg CONFIG_VHOST_VSOCK y $DEF
+            echo "=== 确认结果 ==="
+            grep -nE "^CONFIG_(KSU|KPROBES|VIRTUALIZATION|KVM|VSOCKETS|VHOST_NET|VHOST_VSOCK|TUN|BRIDGE|ARM_GIC_V3)=" $DEF
+          done
 
       - name: 5.修补susfs
         run: |
@@ -102,13 +119,63 @@ jobs:
           echo "=== 通用修复：注释掉不存在的 qdf_set_wake_up_idle 导出 ==="
           sed -i 's/^qdf_export_symbol(qdf_set_wake_up_idle);/\/\/ qdf_export_symbol(qdf_set_wake_up_idle);/' drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
           grep -n "wake_up_idle" drivers/staging/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c | head -3
-        
-      - name: 6.开始构建
+
+      - name: 6.4.19内核兼容层（nofault/TWA_RESUME）
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
+          cat > drivers/kernelsu/compat_419.h <<'KSUEOF'
+          #ifndef _KSU_COMPAT_419_H
+          #define _KSU_COMPAT_419_H
+
+          #include <linux/version.h>
+          #include <linux/types.h>
+          #include <linux/uaccess.h>
+          #include <linux/task_work.h>
+
+          /*
+           * Linux 4.19 does not provide the 5.8+ APIs below.
+           * strncpy_from_unsafe_user() is the direct predecessor of
+           * strncpy_from_user_nofault(); task_work_add() still takes a
+           * bool notify flag instead of the 5.8+ TWA_* enum.
+           */
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+
+          #ifndef TWA_RESUME
+          #define TWA_RESUME true
+          #endif
+
+          #define strncpy_from_user_nofault(dst, src, len) \
+          	strncpy_from_unsafe_user((char *)(dst), (const void __user *)(src), (long)(len))
+
+          #endif /* < 5.8.0 */
+
+          #endif /* _KSU_COMPAT_419_H */
+          KSUEOF
+          echo "compat header written: $(wc -l < drivers/kernelsu/compat_419.h) lines"
+          for f in \
+            drivers/kernelsu/feature/sucompat.c \
+            drivers/kernelsu/runtime/ksud_integration.c \
+            drivers/kernelsu/sulog/event.c \
+            drivers/kernelsu/manager/pkg_observer.c \
+            drivers/kernelsu/policy/allowlist.c \
+            drivers/kernelsu/supercall/supercall.c \
+            drivers/kernelsu/feature/kernel_umount.c ; do
+            if [ -f "$f" ] && ! grep -q 'compat_419.h' "$f"; then
+              sed -i '1i #include "compat_419.h"' "$f"
+              echo "injected -> $f"
+            fi
+          done
+          echo "=== 确认注入 ==="
+          grep -n "compat_419.h" drivers/kernelsu/feature/sucompat.c drivers/kernelsu/policy/allowlist.c | head -4
+          echo "=== 确认 nofault 映射生效 ==="
+          grep -rn "strncpy_from_user_nofault" drivers/kernelsu/ | head -6
+
+      - name: 7.开始构建
         run: |
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
           echo "Updated PATH: $PATH"
           clang --version
-          
+
           cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel
           # 自定义版本
           if [ ! -z ${{ inputs.version }} ]; then
@@ -132,12 +199,14 @@ jobs:
 
           make -j$(nproc --all) CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-androideabi- $DEFCONFIG
           make -j8 CC=clang O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- KCFLAGS="-Wno-implicit-int -Wno-error=implicit-int -Wno-unused-command-line-argument"
-      
-      - name: 7.复制boot文件
+
+      - name: 8.复制boot文件
         run: |
             cd $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/arch/arm64/boot
             ls
             strings Image | grep "Linux version"
+            echo "=== 确认 KVM 已编入 ==="
+            grep -E "^CONFIG_(VIRTUALIZATION|KVM|VSOCKETS|VHOST_NET)=" $GITHUB_WORKSPACE/kernel_workspace/android_kernel/out/.config || true
             mkdir -p $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
             cp Image $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/kernels/miui/
             echo "=== 打包 dtb / dtbo ==="
@@ -147,7 +216,7 @@ jobs:
             echo "=== Anykernel 产物 ==="
             ls -l $GITHUB_WORKSPACE/kernel_workspace/src/Anykernel/
 
-      - name: 8.上传刷机包
+      - name: 9.上传刷机包
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.phone }}-KernelSU-Next-${{ inputs.susfs }}-AnyKernel3
